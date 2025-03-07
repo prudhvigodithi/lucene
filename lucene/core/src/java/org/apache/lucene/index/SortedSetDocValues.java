@@ -32,6 +32,8 @@ public abstract class SortedSetDocValues extends DocValuesIterator {
   /** Sole constructor. (For invocation by subclass constructors, typically implicit.) */
   protected SortedSetDocValues() {}
 
+  @Deprecated public static final long NO_MORE_ORDS = -1;
+
   /**
    * Returns the next ordinal for the current document. It is illegal to call this method after
    * {@link #advanceExact(int)} returned {@code false}. It is illegal to call this more than {@link
