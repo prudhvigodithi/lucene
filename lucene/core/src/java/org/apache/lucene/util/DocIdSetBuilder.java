@@ -51,31 +51,43 @@ public final class DocIdSetBuilder {
     void add(IntsRef docs, int docLowerBoundInclusive);
   }
 
-  private record FixedBitSetAdder(FixedBitSet bitSet) implements BulkAdder {
+  private record FixedBitSetAdder(FixedBitSet bitSet, int minDoc, int maxDocExclusive) implements BulkAdder {
 
     @Override
     public void add(int doc) {
-      bitSet.set(doc);
+      if (doc >= minDoc && doc < maxDocExclusive) {
+        bitSet.set(doc);
+      }
     }
 
     @Override
     public void add(IntsRef docs) {
       for (int i = 0; i < docs.length; i++) {
-        bitSet.set(docs.ints[docs.offset + i]);
+        int doc = docs.ints[docs.offset + i];
+        if (doc >= minDoc && doc < maxDocExclusive) {
+          bitSet.set(doc);
+        }
+      }
+    }
+
+    public void add(DocIdSetIterator iterator) throws IOException {
+      int doc;
+      while ((doc = iterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+        if (doc >= maxDocExclusive) {
+          break; // Docs are in ascending order, so we can break early
+        }
+        if (doc >= minDoc) {
+          bitSet.set(doc);
+        }
       }
     }
 
     @Override
-    public void add(DocIdSetIterator iterator) throws IOException {
-      iterator.nextDoc();
-      iterator.intoBitSet(DocIdSetIterator.NO_MORE_DOCS, bitSet, 0);
-    }
-
-    @Override
     public void add(IntsRef docs, int docLowerBoundInclusive) {
+      int effectiveLowerBound = Math.max(docLowerBoundInclusive, minDoc);
       for (int i = docs.offset, to = docs.offset + docs.length; i < to; i++) {
         int doc = docs.ints[i];
-        if (doc >= docLowerBoundInclusive) {
+        if (doc >= effectiveLowerBound && doc < maxDocExclusive) {
           bitSet.set(doc);
         }
       }
@@ -97,37 +109,47 @@ public final class DocIdSetBuilder {
     }
   }
 
-  private record BufferAdder(Buffer buffer) implements BulkAdder {
+  private record BufferAdder(Buffer buffer, int minDoc, int maxDocExclusive) implements BulkAdder {
 
     @Override
     public void add(int doc) {
-      buffer.array[buffer.length++] = doc;
+      if (doc >= minDoc && doc < maxDocExclusive) {
+        buffer.array[buffer.length++] = doc;
+      }
     }
 
     @Override
     public void add(IntsRef docs) {
-      System.arraycopy(docs.ints, docs.offset, buffer.array, buffer.length, docs.length);
-      buffer.length += docs.length;
+      for (int i = 0; i < docs.length; i++) {
+        int doc = docs.ints[docs.offset + i];
+        if (doc >= minDoc && doc < maxDocExclusive) {
+          buffer.array[buffer.length++] = doc;
+        }
+      }
     }
 
     @Override
     public void add(DocIdSetIterator iterator) throws IOException {
       int docID;
       while ((docID = iterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-        add(docID);
+        if (docID >= maxDocExclusive) {
+          break; // Optimization: docs are in order
+        }
+        if (docID >= minDoc) {
+          buffer.array[buffer.length++] = docID;
+        }
       }
     }
 
     @Override
     public void add(IntsRef docs, int docLowerBoundInclusive) {
-      int index = buffer.length;
+      int effectiveLowerBound = Math.max(docLowerBoundInclusive, minDoc);
       for (int i = docs.offset, to = docs.offset + docs.length; i < to; i++) {
         int doc = docs.ints[i];
-        if (doc >= docLowerBoundInclusive) {
-          buffer.array[index++] = doc;
+        if (doc >= effectiveLowerBound && doc < maxDocExclusive) {
+          buffer.array[buffer.length++] = doc;
         }
       }
-      buffer.length = index;
     }
   }
 
@@ -136,6 +158,10 @@ public final class DocIdSetBuilder {
   // pkg-private for testing
   final boolean multivalued;
   final double numValuesPerDoc;
+
+  // New fields for partition support
+  private final int minDoc;
+  private final int maxDocExclusive;
 
   private List<Buffer> buffers = new ArrayList<>();
   private int totalAllocated; // accumulated size of the allocated buffers
@@ -166,15 +192,33 @@ public final class DocIdSetBuilder {
     this(maxDoc, values.getDocCount(), values.size());
   }
 
+  // New constructors for partition support
+  public DocIdSetBuilder(int maxDoc, int minDoc, int maxDocExclusive) {
+    this(maxDoc, minDoc, maxDocExclusive, -1, -1);
+  }
+
+  public DocIdSetBuilder(int maxDoc, int minDoc, int maxDocExclusive, PointValues values) throws IOException {
+    this(maxDoc, minDoc, maxDocExclusive, values.getDocCount(), values.size());
+  }
+
+  // Original main constructor (backward compatibility)
   DocIdSetBuilder(int maxDoc, int docCount, long valueCount) {
+    this(maxDoc, 0, maxDoc, docCount, valueCount);
+  }
+
+  // Main constructor with partition bounds
+  DocIdSetBuilder(int maxDoc, int minDoc, int maxDocExclusive, int docCount, long valueCount) {
     this.maxDoc = maxDoc;
+    this.minDoc = minDoc;
+    this.maxDocExclusive = maxDocExclusive;
+
+    // Calculate effective size for this partition
+    int effectiveSize = maxDocExclusive - minDoc;
+
     this.multivalued = docCount < 0 || docCount != valueCount;
     if (docCount <= 0 || valueCount < 0) {
-      // assume one value per doc, this means the cost will be overestimated
-      // if the docs are actually multi-valued
       this.numValuesPerDoc = 1;
     } else {
-      // otherwise compute from index stats
       this.numValuesPerDoc = (double) valueCount / docCount;
     }
 
@@ -184,7 +228,10 @@ public final class DocIdSetBuilder {
     // maxDoc >>> 7 is a good value if you want to save memory, lower values
     // such as maxDoc >>> 11 should provide faster building but at the expense
     // of using a full bitset even for quite sparse data
-    this.threshold = maxDoc >>> 7;
+
+    // this.threshold = maxDoc >>> 7;
+
+    this.threshold = effectiveSize >>> 7;
 
     this.bitSet = null;
   }
@@ -267,7 +314,7 @@ public final class DocIdSetBuilder {
   private Buffer addBuffer(int len) {
     Buffer buffer = new Buffer(len);
     buffers.add(buffer);
-    adder = new BufferAdder(buffer);
+    adder = new BufferAdder(buffer, minDoc, maxDocExclusive);
     totalAllocated += buffer.array.length;
     return buffer;
   }
@@ -292,7 +339,7 @@ public final class DocIdSetBuilder {
     this.bitSet = bitSet;
     this.counter = counter;
     this.buffers = null;
-    this.adder = new FixedBitSetAdder(bitSet);
+    this.adder = new FixedBitSetAdder(bitSet, minDoc, maxDocExclusive);
   }
 
   /** Build a {@link DocIdSet} from the accumulated doc IDs. */
