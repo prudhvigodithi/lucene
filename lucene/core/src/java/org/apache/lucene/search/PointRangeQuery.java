@@ -252,6 +252,7 @@ public abstract class PointRangeQuery extends Query {
             public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
                 LeafReader reader = context.reader();
 
+
                 PointValues values = reader.getPointValues(field);
                 if (checkValidPointValues(values) == false) {
                     return null;

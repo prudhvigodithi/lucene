@@ -149,6 +149,7 @@ public abstract class Weight implements SegmentCacheable {
    */
   public abstract ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException;
 
+  public abstract ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition context) throws IOException;
   /**
    * Helper method that delegates to {@link #scorerSupplier(LeafReaderContext)}. It is implemented
    * as
