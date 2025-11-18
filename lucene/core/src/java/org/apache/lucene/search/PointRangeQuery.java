@@ -296,8 +296,9 @@ public abstract class PointRangeQuery extends Query {
       }
 
       @Override
-      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
-        LeafReader reader = context.reader();
+      public ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition partition)
+              throws IOException {
+        LeafReader reader = partition.ctx.reader();
 
         PointValues values = reader.getPointValues(field);
         if (checkValidPointValues(values) == false) {
@@ -345,7 +346,9 @@ public abstract class PointRangeQuery extends Query {
         } else {
           return new ConstantScoreScorerSupplier(score(), scoreMode, reader.maxDoc()) {
 
-            final DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values);
+            final DocIdSetBuilder result =
+                    new DocIdSetBuilder(
+                            reader.maxDoc(), values, partition.minDocId, partition.maxDocId);
             final IntersectVisitor visitor = getIntersectVisitor(result);
             long cost = -1;
 
@@ -381,6 +384,12 @@ public abstract class PointRangeQuery extends Query {
             }
           };
         }
+      }
+
+      @Override
+      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+        return scorerSupplier(
+                IndexSearcher.LeafReaderContextPartition.createForEntireSegment(context));
       }
 
       @Override
