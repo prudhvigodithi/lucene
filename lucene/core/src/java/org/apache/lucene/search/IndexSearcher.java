@@ -79,9 +79,8 @@ public class IndexSearcher {
   @SuppressWarnings("NonFinalStaticField")
   static int maxClauseCount = 1024;
 
-  // Caching is disabled by default.
   @SuppressWarnings("NonFinalStaticField")
-  private static QueryCache DEFAULT_QUERY_CACHE = null;
+  private static QueryCache DEFAULT_QUERY_CACHE;
 
   @SuppressWarnings("NonFinalStaticField")
   private static QueryCachingPolicy DEFAULT_CACHING_POLICY = new UsageTrackingQueryCachingPolicy();
@@ -92,6 +91,13 @@ public class IndexSearcher {
   // that guarantees that writes become visible on the main thread, but making the variable volatile
   // shouldn't hurt either.
   private volatile boolean partialResult = false;
+
+  static {
+    final int maxCachedQueries = 1000;
+    // min of 32MB or 5% of the heap size
+    final long maxRamBytesUsed = Math.min(1L << 25, Runtime.getRuntime().maxMemory() / 20);
+    DEFAULT_QUERY_CACHE = new LRUQueryCache(maxCachedQueries, maxRamBytesUsed);
+  }
 
   /**
    * By default, we count hits accurately up to 1000. This makes sure that we don't spend most time
@@ -217,17 +223,17 @@ public class IndexSearcher {
    */
   public IndexSearcher(IndexReaderContext context, Executor executor) {
     assert context.isTopLevel
-            : "IndexSearcher's ReaderContext must be topLevel for reader " + context.reader();
+        : "IndexSearcher's ReaderContext must be topLevel for reader " + context.reader();
     reader = context.reader();
     this.taskExecutor =
-            executor == null ? new TaskExecutor(Runnable::run) : new TaskExecutor(executor);
+        executor == null ? new TaskExecutor(Runnable::run) : new TaskExecutor(executor);
     this.readerContext = context;
     leafContexts = context.leaves();
     if (executor == null) {
       leafSlices =
-              leafContexts.isEmpty()
-                      ? new LeafSlice[0]
-                      : new LeafSlice[] {LeafSlice.entireSegments(leafContexts)};
+          leafContexts.isEmpty()
+              ? new LeafSlice[0]
+              : new LeafSlice[] {LeafSlice.entireSegments(leafContexts)};
     }
   }
 
@@ -321,7 +327,7 @@ public class IndexSearcher {
    * href="https://github.com/apache/lucene/issues/13745">the corresponding github issue</a>.
    */
   protected LeafSlice[] slices(List<LeafReaderContext> leaves) {
-    return slices(leaves, MAX_DOCS_PER_SLICE, MAX_SEGMENTS_PER_SLICE, true);
+    return slices(leaves, MAX_DOCS_PER_SLICE, MAX_SEGMENTS_PER_SLICE, false);
   }
 
   /**
@@ -339,10 +345,10 @@ public class IndexSearcher {
    * @return the array of slices
    */
   public static LeafSlice[] slices(
-          List<LeafReaderContext> leaves,
-          int maxDocsPerSlice,
-          int maxSegmentsPerSlice,
-          boolean allowSegmentPartitions) {
+      List<LeafReaderContext> leaves,
+      int maxDocsPerSlice,
+      int maxSegmentsPerSlice,
+      boolean allowSegmentPartitions) {
 
     // Make a copy so we can sort:
     List<LeafReaderContext> sortedLeaves = new ArrayList<>(leaves);
@@ -390,7 +396,7 @@ public class IndexSearcher {
   }
 
   private static LeafSlice[] slicesWithSegmentPartitions(
-          int maxDocsPerSlice, int maxSegmentsPerSlice, List<LeafReaderContext> sortedLeaves) {
+      int maxDocsPerSlice, int maxSegmentsPerSlice, List<LeafReaderContext> sortedLeaves) {
     final List<List<LeafReaderContextPartition>> groupedLeafPartitions = new ArrayList<>();
     int currentSliceNumDocs = 0;
     List<LeafReaderContextPartition> group = null;
@@ -405,15 +411,15 @@ public class IndexSearcher {
         int minDocId = 0;
         for (int i = 0; i < numSlices - 1; i++) {
           groupedLeafPartitions.add(
-                  Collections.singletonList(
-                          LeafReaderContextPartition.createFromAndTo(ctx, minDocId, maxDocId)));
+              Collections.singletonList(
+                  LeafReaderContextPartition.createFromAndTo(ctx, minDocId, maxDocId)));
           minDocId = maxDocId;
           maxDocId += numDocs;
         }
         // the last slice gets all the remaining docs
         groupedLeafPartitions.add(
-                Collections.singletonList(
-                        LeafReaderContextPartition.createFromAndTo(ctx, minDocId, ctx.reader().maxDoc())));
+            Collections.singletonList(
+                LeafReaderContextPartition.createFromAndTo(ctx, minDocId, ctx.reader().maxDoc())));
       } else {
         if (group == null) {
           group = new ArrayList<>();
@@ -501,8 +507,8 @@ public class IndexSearcher {
 
     // Check if two clause disjunction optimization applies
     if (query instanceof BooleanQuery booleanQuery
-            && this.reader.hasDeletions() == false
-            && booleanQuery.isTwoClausePureDisjunctionWithTerms()) {
+        && this.reader.hasDeletions() == false
+        && booleanQuery.isTwoClausePureDisjunctionWithTerms()) {
       Query[] queries = booleanQuery.rewriteTwoClauseDisjunctionWithTermsForCount(this);
       int countTerm1 = count(queries[0]);
       int countTerm2 = count(queries[1]);
@@ -510,7 +516,7 @@ public class IndexSearcher {
         return Math.max(countTerm1, countTerm2);
         // Only apply optimization if the intersection is significantly smaller than the union
       } else if ((double) Math.min(countTerm1, countTerm2) / Math.max(countTerm1, countTerm2)
-              < 0.1) {
+          < 0.1) {
         return countTerm1 + countTerm2 - count(queries[2]);
       }
     }
@@ -558,7 +564,7 @@ public class IndexSearcher {
     for (LeafReaderContextPartition leafPartition : leafSlice.partitions) {
       if (distinctLeaves.add(leafPartition.ctx) == false) {
         throw new IllegalStateException(
-                "The same slice targets multiple leaf partitions of the same leaf reader context. A physical segment should rather get partitioned to be searched concurrently from as many slices as the number of leaf partitions it is split into.");
+            "The same slice targets multiple leaf partitions of the same leaf reader context. A physical segment should rather get partitioned to be searched concurrently from as many slices as the number of leaf partitions it is split into.");
       }
     }
   }
@@ -577,15 +583,15 @@ public class IndexSearcher {
     final int limit = Math.max(1, reader.maxDoc());
     if (after != null && after.doc >= limit) {
       throw new IllegalArgumentException(
-              "after.doc exceeds the number of documents in the reader: after.doc="
-                      + after.doc
-                      + " limit="
-                      + limit);
+          "after.doc exceeds the number of documents in the reader: after.doc="
+              + after.doc
+              + " limit="
+              + limit);
     }
 
     final int cappedNumHits = Math.min(numHits, limit);
     CollectorManager<TopScoreDocCollector, TopDocs> manager =
-            new TopScoreDocCollectorManager(cappedNumHits, after, TOTAL_HITS_THRESHOLD);
+        new TopScoreDocCollectorManager(cappedNumHits, after, TOTAL_HITS_THRESHOLD);
 
     return search(query, manager);
   }
@@ -649,7 +655,7 @@ public class IndexSearcher {
    *     clauses.
    */
   public TopFieldDocs search(Query query, int n, Sort sort, boolean doDocScores)
-          throws IOException {
+      throws IOException {
     return searchAfter(null, query, n, sort, doDocScores);
   }
 
@@ -696,7 +702,7 @@ public class IndexSearcher {
    *     clauses.
    */
   public TopFieldDocs searchAfter(
-          ScoreDoc after, Query query, int numHits, Sort sort, boolean doDocScores) throws IOException {
+      ScoreDoc after, Query query, int numHits, Sort sort, boolean doDocScores) throws IOException {
     if (after != null && !(after instanceof FieldDoc)) {
       // TODO: if we fix type safety of TopFieldDocs we can
       // remove this
@@ -706,20 +712,20 @@ public class IndexSearcher {
   }
 
   private TopFieldDocs searchAfter(
-          FieldDoc after, Query query, int numHits, Sort sort, boolean doDocScores) throws IOException {
+      FieldDoc after, Query query, int numHits, Sort sort, boolean doDocScores) throws IOException {
     final int limit = Math.max(1, reader.maxDoc());
     if (after != null && after.doc >= limit) {
       throw new IllegalArgumentException(
-              "after.doc exceeds the number of documents in the reader: after.doc="
-                      + after.doc
-                      + " limit="
-                      + limit);
+          "after.doc exceeds the number of documents in the reader: after.doc="
+              + after.doc
+              + " limit="
+              + limit);
     }
     final int cappedNumHits = Math.min(numHits, limit);
     final Sort rewrittenSort = sort.rewrite(this);
 
     final CollectorManager<TopFieldCollector, TopFieldDocs> manager =
-            new TopFieldCollectorManager(rewrittenSort, cappedNumHits, after, TOTAL_HITS_THRESHOLD);
+        new TopFieldCollectorManager(rewrittenSort, cappedNumHits, after, TOTAL_HITS_THRESHOLD);
 
     TopFieldDocs topDocs = search(query, manager);
     if (doDocScores) {
@@ -737,7 +743,7 @@ public class IndexSearcher {
    * @lucene.experimental
    */
   public <C extends Collector, T> T search(Query query, CollectorManager<C, T> collectorManager)
-          throws IOException {
+      throws IOException {
     final C firstCollector = collectorManager.newCollector();
     query = rewrite(query, firstCollector.scoreMode().needsScores());
     final Weight weight = createWeight(query, firstCollector.scoreMode(), 1);
@@ -745,7 +751,7 @@ public class IndexSearcher {
   }
 
   private <C extends Collector, T> T search(
-          Weight weight, CollectorManager<C, T> collectorManager, C firstCollector) throws IOException {
+      Weight weight, CollectorManager<C, T> collectorManager, C firstCollector) throws IOException {
     final LeafSlice[] leafSlices = getSlices();
     if (leafSlices.length == 0) {
       // there are no segments, nothing to offload to the executor, but we do need to call reduce to
@@ -761,7 +767,7 @@ public class IndexSearcher {
         collectors.add(collector);
         if (scoreMode != collector.scoreMode()) {
           throw new IllegalStateException(
-                  "CollectorManager does not always produce collectors with the same score mode");
+              "CollectorManager does not always produce collectors with the same score mode");
         }
       }
       final List<Callable<C>> listTasks = new ArrayList<>(leafSlices.length);
@@ -769,10 +775,10 @@ public class IndexSearcher {
         final LeafReaderContextPartition[] leaves = leafSlices[i].partitions;
         final C collector = collectors.get(i);
         listTasks.add(
-                () -> {
-                  search(leaves, weight, collector);
-                  return collector;
-                });
+            () -> {
+              search(leaves, weight, collector);
+              return collector;
+            });
       }
       List<C> results = taskExecutor.invokeAll(listTasks);
       return collectorManager.reduce(results);
@@ -795,7 +801,7 @@ public class IndexSearcher {
    *     clauses.
    */
   protected void search(LeafReaderContextPartition[] partitions, Weight weight, Collector collector)
-          throws IOException {
+      throws IOException {
 
     collector.setWeight(weight);
 
@@ -818,12 +824,14 @@ public class IndexSearcher {
    *     clauses.
    */
   protected void searchLeaf(
-          LeafReaderContext ctx, int minDocId, int maxDocId, Weight weight, Collector collector)
-          throws IOException {
+      LeafReaderContext ctx, int minDocId, int maxDocId, Weight weight, Collector collector)
+      throws IOException {
     final LeafCollector leafCollector;
     try {
       leafCollector = collector.getLeafCollector(ctx);
-    } catch (CollectionTerminatedException _) {
+    } catch (
+        @SuppressWarnings("unused")
+        CollectionTerminatedException e) {
       // there is no doc of interest in this reader context
       // continue with the following leaf
       return;
@@ -846,10 +854,14 @@ public class IndexSearcher {
         // Optimize for the case when live docs are stored in a FixedBitSet.
         Bits acceptDocs = ScorerUtil.likelyLiveDocs(ctx.reader().getLiveDocs());
         scorer.score(leafCollector, acceptDocs, minDocId, maxDocId);
-      } catch (CollectionTerminatedException _) {
+      } catch (
+          @SuppressWarnings("unused")
+          CollectionTerminatedException e) {
         // collection was terminated prematurely
         // continue with the following leaf
-      } catch (TimeLimitingBulkScorer.TimeExceededException _) {
+      } catch (
+          @SuppressWarnings("unused")
+          TimeLimitingBulkScorer.TimeExceededException e) {
         partialResult = true;
       }
     }
@@ -867,8 +879,8 @@ public class IndexSearcher {
   public Query rewrite(Query original) throws IOException {
     Query query = original;
     for (Query rewrittenQuery = query.rewrite(this);
-         rewrittenQuery != query;
-         rewrittenQuery = query.rewrite(this)) {
+        rewrittenQuery != query;
+        rewrittenQuery = query.rewrite(this)) {
       query = rewrittenQuery;
     }
     query.visit(getNumClausesCheckVisitor());
@@ -918,7 +930,7 @@ public class IndexSearcher {
 
       @Override
       public void consumeTermsMatching(
-              Query query, String field, Supplier<ByteRunAutomaton> automaton) {
+          Query query, String field, Supplier<ByteRunAutomaton> automaton) {
         if (numClauses > maxClauseCount) {
           throw new TooManyNestedClauses();
         }
@@ -998,8 +1010,8 @@ public class IndexSearcher {
   public static class LeafSlice {
 
     private static final Comparator<LeafReaderContextPartition> COMPARATOR =
-            Comparator.<LeafReaderContextPartition>comparingInt(l -> l.ctx.docBase)
-                    .thenComparingInt(l -> l.minDocId);
+        Comparator.<LeafReaderContextPartition>comparingInt(l -> l.ctx.docBase)
+            .thenComparingInt(l -> l.minDocId);
 
     /**
      * The leaves that make up this slice.
@@ -1062,25 +1074,25 @@ public class IndexSearcher {
     private final int maxDocs;
 
     private LeafReaderContextPartition(
-            LeafReaderContext leafReaderContext, int minDocId, int maxDocId, int maxDocs) {
+        LeafReaderContext leafReaderContext, int minDocId, int maxDocId, int maxDocs) {
       if (minDocId >= maxDocId) {
         throw new IllegalArgumentException(
-                "minDocId is greater than or equal to maxDocId: ["
-                        + minDocId
-                        + "] > ["
-                        + maxDocId
-                        + "]");
+            "minDocId is greater than or equal to maxDocId: ["
+                + minDocId
+                + "] > ["
+                + maxDocId
+                + "]");
       }
       if (minDocId < 0) {
         throw new IllegalArgumentException("minDocId is lower than 0: [" + minDocId + "]");
       }
       if (minDocId >= leafReaderContext.reader().maxDoc()) {
         throw new IllegalArgumentException(
-                "minDocId is greater than than maxDoc: ["
-                        + minDocId
-                        + "] > ["
-                        + leafReaderContext.reader().maxDoc()
-                        + "]");
+            "minDocId is greater than than maxDoc: ["
+                + minDocId
+                + "] > ["
+                + leafReaderContext.reader().maxDoc()
+                + "]");
       }
 
       this.ctx = leafReaderContext;
@@ -1092,7 +1104,7 @@ public class IndexSearcher {
     /** Creates a partition of the provided leaf context that targets the entire segment */
     public static LeafReaderContextPartition createForEntireSegment(LeafReaderContext ctx) {
       return new LeafReaderContextPartition(
-              ctx, 0, DocIdSetIterator.NO_MORE_DOCS, ctx.reader().maxDoc());
+          ctx, 0, DocIdSetIterator.NO_MORE_DOCS, ctx.reader().maxDoc());
     }
 
     /**
@@ -1101,7 +1113,7 @@ public class IndexSearcher {
      * doc id
      */
     public static LeafReaderContextPartition createFromAndTo(
-            LeafReaderContext ctx, int minDocId, int maxDocId) {
+        LeafReaderContext ctx, int minDocId, int maxDocId) {
       assert maxDocId != DocIdSetIterator.NO_MORE_DOCS;
       return new LeafReaderContextPartition(ctx, minDocId, maxDocId, maxDocId - minDocId);
     }
@@ -1124,7 +1136,7 @@ public class IndexSearcher {
    * @lucene.experimental
    */
   public TermStatistics termStatistics(Term term, int docFreq, long totalTermFreq)
-          throws IOException {
+      throws IOException {
     // This constructor will throw an exception if docFreq <= 0.
     return new TermStatistics(term.bytes(), docFreq, totalTermFreq);
   }
@@ -1196,8 +1208,8 @@ public class IndexSearcher {
   public static class TooManyNestedClauses extends TooManyClauses {
     public TooManyNestedClauses() {
       super(
-              "Query contains too many nested clauses; maxClauseCount is set to "
-                      + IndexSearcher.getMaxClauseCount());
+          "Query contains too many nested clauses; maxClauseCount is set to "
+              + IndexSearcher.getMaxClauseCount());
     }
   }
 }
