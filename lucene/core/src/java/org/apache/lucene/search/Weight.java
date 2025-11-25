@@ -150,6 +150,31 @@ public abstract class Weight implements SegmentCacheable {
   public abstract ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException;
 
   /**
+   * Returns a {@link ScorerSupplier}, which can then be used to get a {@link Scorer} for a
+   * partition of a leaf reader context.
+   *
+   * <p>This method allows queries to optimize for intra-segment concurrency by knowing the specific
+   * doc ID range being searched within the segment. The default implementation delegates to {@link
+   * #scorerSupplier(LeafReaderContext)} ignoring the partition bounds. Queries that can benefit
+   * from partition awareness (e.g., by creating smaller data structures scoped to the partition)
+   * should override this method.
+   *
+   * <p>A scorer supplier for the same {@link LeafReaderContext} instance may be requested multiple
+   * times as part of a single search call, potentially from different threads searching different
+   * doc ID ranges concurrently.
+   *
+   * @param partition the leaf reader context partition containing the context and doc ID range
+   * @return a {@link ScorerSupplier} providing the scorer, or null if scorer is null
+   * @throws IOException if an IOException occurs
+   * @see IndexSearcher.LeafReaderContextPartition
+   * @since 10.1
+   */
+  public ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition partition)
+          throws IOException {
+    return scorerSupplier(partition.ctx);
+  }
+
+  /**
    * Helper method that delegates to {@link #scorerSupplier(LeafReaderContext)}. It is implemented
    * as
    *
@@ -250,7 +275,7 @@ public abstract class Weight implements SegmentCacheable {
 
     @Override
     public int score(LeafCollector collector, Bits acceptDocs, int min, int max)
-        throws IOException {
+            throws IOException {
       collector.setScorer(scorer);
       DocIdSetIterator competitiveIterator = collector.competitiveIterator();
 
@@ -284,15 +309,15 @@ public abstract class Weight implements SegmentCacheable {
         scoreCompetitiveIterator(collector, acceptDocs, iterator, competitiveIterator, max);
       } else {
         scoreTwoPhaseOrCompetitiveIterator(
-            collector, acceptDocs, iterator, twoPhase, competitiveIterator, max);
+                collector, acceptDocs, iterator, twoPhase, competitiveIterator, max);
       }
 
       return iterator.docID();
     }
 
     private static void scoreIterator(
-        LeafCollector collector, Bits acceptDocs, DocIdSetIterator iterator, int max)
-        throws IOException {
+            LeafCollector collector, Bits acceptDocs, DocIdSetIterator iterator, int max)
+            throws IOException {
       for (int doc = iterator.docID(); doc < max; doc = iterator.nextDoc()) {
         if (acceptDocs == null || acceptDocs.get(doc)) {
           collector.collect(doc);
@@ -301,12 +326,12 @@ public abstract class Weight implements SegmentCacheable {
     }
 
     private static void scoreTwoPhaseIterator(
-        LeafCollector collector,
-        Bits acceptDocs,
-        DocIdSetIterator iterator,
-        TwoPhaseIterator twoPhase,
-        int max)
-        throws IOException {
+            LeafCollector collector,
+            Bits acceptDocs,
+            DocIdSetIterator iterator,
+            TwoPhaseIterator twoPhase,
+            int max)
+            throws IOException {
       for (int doc = iterator.docID(); doc < max; doc = iterator.nextDoc()) {
         if ((acceptDocs == null || acceptDocs.get(doc)) && twoPhase.matches()) {
           collector.collect(doc);
@@ -315,12 +340,12 @@ public abstract class Weight implements SegmentCacheable {
     }
 
     private static void scoreCompetitiveIterator(
-        LeafCollector collector,
-        Bits acceptDocs,
-        DocIdSetIterator iterator,
-        DocIdSetIterator competitiveIterator,
-        int max)
-        throws IOException {
+            LeafCollector collector,
+            Bits acceptDocs,
+            DocIdSetIterator iterator,
+            DocIdSetIterator competitiveIterator,
+            int max)
+            throws IOException {
       for (int doc = iterator.docID(); doc < max; ) {
         assert competitiveIterator.docID() <= doc; // invariant
         if (competitiveIterator.docID() < doc) {
@@ -340,13 +365,13 @@ public abstract class Weight implements SegmentCacheable {
     }
 
     private static void scoreTwoPhaseOrCompetitiveIterator(
-        LeafCollector collector,
-        Bits acceptDocs,
-        DocIdSetIterator iterator,
-        TwoPhaseIterator twoPhase,
-        DocIdSetIterator competitiveIterator,
-        int max)
-        throws IOException {
+            LeafCollector collector,
+            Bits acceptDocs,
+            DocIdSetIterator iterator,
+            TwoPhaseIterator twoPhase,
+            DocIdSetIterator competitiveIterator,
+            int max)
+            throws IOException {
       for (int doc = iterator.docID(); doc < max; ) {
         assert competitiveIterator.docID() <= doc; // invariant
         if (competitiveIterator.docID() < doc) {
