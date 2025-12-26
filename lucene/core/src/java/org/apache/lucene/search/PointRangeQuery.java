@@ -450,63 +450,92 @@ public abstract class PointRangeQuery extends Query {
         return true;
       }
 
-      // Cache for sharing BKD traversal results across partitions
-      private volatile DocIdSet cachedDocIdSet;
-      private final Object cacheLock = new Object();
+      // Shared bitset for parallel value-space BKD traversal
+      private volatile FixedBitSet sharedBitSet;
+      private final Object initLock = new Object();
 
       @Override
       public ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition partition)
           throws IOException {
-        // For partitioned search, share the BKD traversal result across partitions
-        if (partition.numPartitions > 1) {
-          DocIdSet docIdSet = cachedDocIdSet;
-          if (docIdSet == null) {
-            synchronized (cacheLock) {
-              docIdSet = cachedDocIdSet;
-              if (docIdSet == null) {
-                // Build once
-                ScorerSupplier supplier = scorerSupplier(partition.ctx);
-                if (supplier == null) {
-                  cachedDocIdSet = DocIdSet.EMPTY;
-                  return null;
-                }
-                // Get the iterator to materialize the bitset
-                DocIdSetIterator iter = supplier.get(Long.MAX_VALUE).iterator();
-                if (iter instanceof BitSetIterator bsi) {
-                  cachedDocIdSet = new BitDocIdSet(bsi.getBitSet());
-                } else {
-                  // Materialize to FixedBitSet
-                  FixedBitSet bits = new FixedBitSet(partition.ctx.reader().maxDoc());
-                  int doc;
-                  while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-                    bits.set(doc);
-                  }
-                  cachedDocIdSet = new BitDocIdSet(bits);
-                }
-                docIdSet = cachedDocIdSet;
-              }
-            }
-          }
-          
-          if (docIdSet == DocIdSet.EMPTY) {
-            return null;
-          }
-          
-          final DocIdSet finalDocIdSet = docIdSet;
-          return new ScorerSupplier() {
-            @Override
-            public Scorer get(long leadCost) throws IOException {
-              return new ConstantScoreScorer(score(), scoreMode, finalDocIdSet.iterator());
-            }
-
-            @Override
-            public long cost() {
-              return finalDocIdSet.ramBytesUsed();
-            }
-          };
+        // Only for 1D integer points with multiple partitions
+        if (numDims != 1 || bytesPerDim != Integer.BYTES || partition.numPartitions <= 1) {
+          return scorerSupplier(partition.ctx);
         }
-        
-        return scorerSupplier(partition.ctx);
+
+        LeafReader reader = partition.ctx.reader();
+        PointValues values = reader.getPointValues(field);
+        if (checkValidPointValues(values) == false || values.getDocCount() == 0) {
+          return null;
+        }
+
+        // Initialize shared bitset once (non-blocking after init)
+        FixedBitSet bits = sharedBitSet;
+        if (bits == null) {
+          synchronized (initLock) {
+            bits = sharedBitSet;
+            if (bits == null) {
+              sharedBitSet = bits = new FixedBitSet(reader.maxDoc());
+            }
+          }
+        }
+        final FixedBitSet result = bits;
+
+        // Split value range - each partition gets different values
+        int queryLower = IntPoint.decodeDimension(lowerPoint, 0);
+        int queryUpper = IntPoint.decodeDimension(upperPoint, 0);
+        int valueRange = queryUpper - queryLower + 1;
+        int partitionSize = (valueRange + partition.numPartitions - 1) / partition.numPartitions;
+        int partLower = queryLower + (partition.partitionIndex * partitionSize);
+        int partUpper = Math.min(partLower + partitionSize - 1, queryUpper);
+
+        if (partLower > queryUpper) {
+          return null;
+        }
+
+        byte[] partLowerBytes = new byte[bytesPerDim];
+        byte[] partUpperBytes = new byte[bytesPerDim];
+        IntPoint.encodeDimension(partLower, partLowerBytes, 0);
+        IntPoint.encodeDimension(partUpper, partUpperBytes, 0);
+
+        return new ScorerSupplier() {
+          @Override
+          public Scorer get(long leadCost) throws IOException {
+            // Parallel BKD traversal - each thread walks its value range
+            values.intersect(new IntersectVisitor() {
+              @Override
+              public void visit(int docID) {
+                result.set(docID);
+              }
+
+              @Override
+              public void visit(int docID, byte[] packedValue) {
+                if (comparator.compare(packedValue, 0, partLowerBytes, 0) >= 0
+                    && comparator.compare(packedValue, 0, partUpperBytes, 0) <= 0) {
+                  result.set(docID);
+                }
+              }
+
+              @Override
+              public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+                if (comparator.compare(partLowerBytes, 0, maxPackedValue, 0) > 0
+                    || comparator.compare(partUpperBytes, 0, minPackedValue, 0) < 0) {
+                  return Relation.CELL_OUTSIDE_QUERY;
+                }
+                if (comparator.compare(minPackedValue, 0, partLowerBytes, 0) >= 0
+                    && comparator.compare(maxPackedValue, 0, partUpperBytes, 0) <= 0) {
+                  return Relation.CELL_INSIDE_QUERY;
+                }
+                return Relation.CELL_CROSSES_QUERY;
+              }
+            });
+            return new ConstantScoreScorer(score(), scoreMode, new BitSetIterator(result, result.cardinality()));
+          }
+
+          @Override
+          public long cost() {
+            return reader.maxDoc() / partition.numPartitions;
+          }
+        };
       }
     };
   }
