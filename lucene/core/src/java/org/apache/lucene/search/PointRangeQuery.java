@@ -452,8 +452,117 @@ public abstract class PointRangeQuery extends Query {
       @Override
       public ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition partition)
           throws IOException {
-        // Disable value-space parallelism for now - fall back to standard path
-        return scorerSupplier(partition.ctx);
+        // Only use value-space parallelism for 1D integer points with multiple partitions
+        if (numDims != 1 || bytesPerDim != Integer.BYTES || partition.numPartitions <= 1) {
+          return scorerSupplier(partition.ctx);
+        }
+
+        // Split the value range across partitions
+        int queryLower = IntPoint.decodeDimension(lowerPoint, 0);
+        int queryUpper = IntPoint.decodeDimension(upperPoint, 0);
+        int valueRange = queryUpper - queryLower + 1;
+        int partitionSize = (valueRange + partition.numPartitions - 1) / partition.numPartitions;
+
+        int partLower = queryLower + (partition.partitionIndex * partitionSize);
+        int partUpper = Math.min(partLower + partitionSize - 1, queryUpper);
+
+        if (partLower > queryUpper) {
+          return null;
+        }
+
+        byte[] partLowerBytes = new byte[bytesPerDim];
+        byte[] partUpperBytes = new byte[bytesPerDim];
+        IntPoint.encodeDimension(partLower, partLowerBytes, 0);
+        IntPoint.encodeDimension(partUpper, partUpperBytes, 0);
+
+        LeafReaderContext context = partition.ctx;
+        LeafReader reader = context.reader();
+        PointValues values = reader.getPointValues(field);
+
+        if (checkValidPointValues(values) == false || values.getDocCount() == 0) {
+          return null;
+        }
+
+        byte[] fieldPackedLower = values.getMinPackedValue();
+        byte[] fieldPackedUpper = values.getMaxPackedValue();
+        if (comparator.compare(partLowerBytes, 0, fieldPackedUpper, 0) > 0
+            || comparator.compare(partUpperBytes, 0, fieldPackedLower, 0) < 0) {
+          return null;
+        }
+
+        return new ConstantScoreScorerSupplier(score(), scoreMode, reader.maxDoc()) {
+          @Override
+          public DocIdSetIterator iterator(long leadCost) throws IOException {
+            DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values);
+            IntersectVisitor visitor =
+                new IntersectVisitor() {
+                  DocIdSetBuilder.BulkAdder adder;
+
+                  @Override
+                  public void grow(int count) {
+                    adder = result.grow(count);
+                  }
+
+                  @Override
+                  public void visit(int docID) {
+                    adder.add(docID);
+                  }
+
+                  @Override
+                  public void visit(DocIdSetIterator iterator) throws IOException {
+                    adder.add(iterator);
+                  }
+
+                  @Override
+                  public void visit(IntsRef ref) {
+                    adder.add(ref);
+                  }
+
+                  @Override
+                  public void visit(int docID, byte[] packedValue) {
+                    if (comparator.compare(packedValue, 0, partLowerBytes, 0) >= 0
+                        && comparator.compare(packedValue, 0, partUpperBytes, 0) <= 0) {
+                      visit(docID);
+                    }
+                  }
+
+                  @Override
+                  public void visit(DocIdSetIterator iterator, byte[] packedValue)
+                      throws IOException {
+                    if (comparator.compare(packedValue, 0, partLowerBytes, 0) >= 0
+                        && comparator.compare(packedValue, 0, partUpperBytes, 0) <= 0) {
+                      adder.add(iterator);
+                    }
+                  }
+
+                  @Override
+                  public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+                    if (comparator.compare(partLowerBytes, 0, maxPackedValue, 0) > 0
+                        || comparator.compare(partUpperBytes, 0, minPackedValue, 0) < 0) {
+                      return Relation.CELL_OUTSIDE_QUERY;
+                    }
+                    if (comparator.compare(minPackedValue, 0, partLowerBytes, 0) >= 0
+                        && comparator.compare(maxPackedValue, 0, partUpperBytes, 0) <= 0) {
+                      return Relation.CELL_INSIDE_QUERY;
+                    }
+                    return Relation.CELL_CROSSES_QUERY;
+                  }
+                };
+
+            values.intersect(visitor);
+            return result.build().iterator();
+          }
+
+          @Override
+          public long cost() {
+            try {
+              return values.estimateDocCount(getIntersectVisitor(new DocIdSetBuilder(1, values)))
+                  / partition.numPartitions;
+            } catch (IOException e) {
+              return reader.maxDoc() / partition.numPartitions;
+            }
+          }
+        };
       }
     };
   }
