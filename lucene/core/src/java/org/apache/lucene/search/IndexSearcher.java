@@ -627,6 +627,7 @@ public class IndexSearcher {
   public void search(Query query, Collector collector) throws IOException {
     query = rewrite(query, collector.scoreMode().needsScores());
     Weight weight = createWeight(query, collector.scoreMode(), 1);
+
     collector.setWeight(weight);
     for (LeafReaderContext ctx : leafContexts) { // search each subreader
       searchLeaf(ctx, 0, DocIdSetIterator.NO_MORE_DOCS, weight, collector);
@@ -799,41 +800,8 @@ public class IndexSearcher {
     collector.setWeight(weight);
 
     for (LeafReaderContextPartition partition : partitions) { // search each subreader partition
-      searchLeaf(partition, weight, collector);
+      searchLeaf(partition.ctx, partition.minDocId, partition.maxDocId, weight, collector);
     }
-  }
-
-  /**
-   * Lower-level search API - searches a partition with full partition info.
-   *
-   * @param partition the leaf partition to execute the search against
-   * @param weight to match documents
-   * @param collector to receive hits
-   */
-  protected void searchLeaf(
-      LeafReaderContextPartition partition, Weight weight, Collector collector) throws IOException {
-    final LeafCollector leafCollector;
-    try {
-      leafCollector = collector.getLeafCollector(partition.ctx);
-    } catch (CollectionTerminatedException _) {
-      return;
-    }
-    ScorerSupplier scorerSupplier = weight.scorerSupplier(partition);
-    if (scorerSupplier != null) {
-      scorerSupplier.setTopLevelScoringClause();
-      BulkScorer scorer = scorerSupplier.bulkScorer();
-      if (queryTimeout != null) {
-        scorer = new TimeLimitingBulkScorer(scorer, queryTimeout);
-      }
-      try {
-        Bits acceptDocs = ScorerUtil.likelyLiveDocs(partition.ctx.reader().getLiveDocs());
-        scorer.score(leafCollector, acceptDocs, partition.minDocId, partition.maxDocId);
-      } catch (CollectionTerminatedException _) {
-      } catch (TimeLimitingBulkScorer.TimeExceededException _) {
-        partialResult = true;
-      }
-    }
-    leafCollector.finish();
   }
 
   /**
@@ -860,7 +828,14 @@ public class IndexSearcher {
       // continue with the following leaf
       return;
     }
-    ScorerSupplier scorerSupplier = weight.scorerSupplier(ctx);
+    ScorerSupplier scorerSupplier;
+    if (minDocId == 0 && maxDocId == DocIdSetIterator.NO_MORE_DOCS) {
+      scorerSupplier = weight.scorerSupplier(ctx);
+    } else {
+      LeafReaderContextPartition partition =
+          LeafReaderContextPartition.createFromAndTo(ctx, minDocId, maxDocId);
+      scorerSupplier = weight.scorerSupplier(partition);
+    }
     if (scorerSupplier != null) {
       scorerSupplier.setTopLevelScoringClause();
       BulkScorer scorer = scorerSupplier.bulkScorer();
@@ -1087,10 +1062,7 @@ public class IndexSearcher {
     private final int maxDocs;
 
     private LeafReaderContextPartition(
-        LeafReaderContext leafReaderContext,
-        int minDocId,
-        int maxDocId,
-        int maxDocs) {
+        LeafReaderContext leafReaderContext, int minDocId, int maxDocId, int maxDocs) {
       if (minDocId >= maxDocId) {
         throw new IllegalArgumentException(
             "minDocId is greater than or equal to maxDocId: ["
