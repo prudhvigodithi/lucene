@@ -627,7 +627,6 @@ public class IndexSearcher {
   public void search(Query query, Collector collector) throws IOException {
     query = rewrite(query, collector.scoreMode().needsScores());
     Weight weight = createWeight(query, collector.scoreMode(), 1);
-
     collector.setWeight(weight);
     for (LeafReaderContext ctx : leafContexts) { // search each subreader
       searchLeaf(ctx, 0, DocIdSetIterator.NO_MORE_DOCS, weight, collector);
@@ -797,6 +796,7 @@ public class IndexSearcher {
    */
   protected void search(LeafReaderContextPartition[] partitions, Weight weight, Collector collector)
       throws IOException {
+
     collector.setWeight(weight);
 
     for (LeafReaderContextPartition partition : partitions) { // search each subreader partition
