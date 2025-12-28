@@ -457,56 +457,45 @@ public abstract class PointRangeQuery extends Query {
       @Override
       public ScorerSupplier scorerSupplier(IndexSearcher.LeafReaderContextPartition partition)
           throws IOException {
-        // For partitioned search, share the BKD traversal result across partitions
-        if (partition.numPartitions > 1) {
-          DocIdSet docIdSet = cachedDocIdSet;
-          if (docIdSet == null) {
-            synchronized (cacheLock) {
-              docIdSet = cachedDocIdSet;
-              if (docIdSet == null) {
-                // Build once
-                ScorerSupplier supplier = scorerSupplier(partition.ctx);
-                if (supplier == null) {
-                  cachedDocIdSet = DocIdSet.EMPTY;
-                  return null;
-                }
-                // Get the iterator to materialize the bitset
-                DocIdSetIterator iter = supplier.get(Long.MAX_VALUE).iterator();
-                if (iter instanceof BitSetIterator bsi) {
-                  cachedDocIdSet = new BitDocIdSet(bsi.getBitSet());
-                } else {
-                  // Materialize to FixedBitSet
-                  FixedBitSet bits = new FixedBitSet(partition.ctx.reader().maxDoc());
-                  int doc;
-                  while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-                    bits.set(doc);
-                  }
-                  cachedDocIdSet = new BitDocIdSet(bits);
-                }
-                docIdSet = cachedDocIdSet;
+        DocIdSet docIdSet = cachedDocIdSet;
+        if (docIdSet == null) {
+          synchronized (cacheLock) {
+            docIdSet = cachedDocIdSet;
+            if (docIdSet == null) {
+              ScorerSupplier supplier = scorerSupplier(partition.ctx);
+              if (supplier == null) {
+                cachedDocIdSet = DocIdSet.EMPTY;
+                return null;
               }
+              DocIdSetIterator iter = supplier.get(Long.MAX_VALUE).iterator();
+              if (iter instanceof BitSetIterator bsi) {
+                cachedDocIdSet = new BitDocIdSet(bsi.getBitSet());
+              } else {
+                FixedBitSet bits = new FixedBitSet(partition.ctx.reader().maxDoc());
+                int doc;
+                while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+                  bits.set(doc);
+                }
+                cachedDocIdSet = new BitDocIdSet(bits);
+              }
+              docIdSet = cachedDocIdSet;
             }
           }
-          
-          if (docIdSet == DocIdSet.EMPTY) {
-            return null;
-          }
-          
-          final DocIdSet finalDocIdSet = docIdSet;
-          return new ScorerSupplier() {
-            @Override
-            public Scorer get(long leadCost) throws IOException {
-              return new ConstantScoreScorer(score(), scoreMode, finalDocIdSet.iterator());
-            }
-
-            @Override
-            public long cost() {
-              return finalDocIdSet.ramBytesUsed();
-            }
-          };
         }
-        
-        return scorerSupplier(partition.ctx);
+        if (docIdSet == DocIdSet.EMPTY) {
+          return null;
+        }
+        final DocIdSet finalDocIdSet = docIdSet;
+        return new ScorerSupplier() {
+          @Override
+          public Scorer get(long leadCost) throws IOException {
+            return new ConstantScoreScorer(score(), scoreMode, finalDocIdSet.iterator());
+          }
+          @Override
+          public long cost() {
+            return finalDocIdSet.ramBytesUsed();
+          }
+        };
       }
     };
   }
