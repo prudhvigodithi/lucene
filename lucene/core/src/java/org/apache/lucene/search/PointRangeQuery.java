@@ -488,7 +488,7 @@ public abstract class PointRangeQuery extends Query {
         final DocIdSet finalDocIdSet = docIdSet;
         return new ScorerSupplier() {
           @Override
-          public Scorer get(long leadCost) throws IOException {
+          public Scorer get(long leadCost) {
             return new ConstantScoreScorer(score(), scoreMode, finalDocIdSet.iterator());
           }
           @Override
