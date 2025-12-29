@@ -57,6 +57,9 @@ public class PointRangeQueryBenchmark {
   @Param({"4000", "40000"})  // 4% and 40% selectivity
   int queryRange;
 
+  @Param({"1", "4", "8"})  // Test with different segment counts
+  int numSegments;
+
   private Path tempDir;
   private Directory directory;
   private DirectoryReader reader;
@@ -75,15 +78,18 @@ public class PointRangeQueryBenchmark {
 
     // Values from 0 to 100000
     int maxValue = 100000;
+    int docsPerSegment = numDocs / numSegments;
     try (IndexWriter writer = new IndexWriter(directory, config)) {
       Random random = new Random(42);
-      for (int i = 0; i < numDocs; i++) {
-        Document doc = new Document();
-        int value = random.nextInt(maxValue);
-        doc.add(new IntPoint("price", value));
-        writer.addDocument(doc);
+      for (int seg = 0; seg < numSegments; seg++) {
+        for (int i = 0; i < docsPerSegment; i++) {
+          Document doc = new Document();
+          int value = random.nextInt(maxValue);
+          doc.add(new IntPoint("price", value));
+          writer.addDocument(doc);
+        }
+        writer.commit();  // Force new segment after each batch
       }
-      writer.forceMerge(1);
     }
 
     reader = DirectoryReader.open(directory);
