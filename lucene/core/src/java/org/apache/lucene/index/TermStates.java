@@ -18,6 +18,9 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.util.ArrayUtil;
@@ -120,6 +123,84 @@ public final class TermStates {
       }
     }
     return perReaderTermState;
+  }
+
+  /**
+   * Batched version of {@link #build(IndexSearcher, Term, boolean)} that builds {@link TermStates}
+   * for multiple terms in parallel. This method will lookup all given terms across all leaf readers
+   * and fire all I/O prefetch hints before resolving any of them, enabling maximum parallelization.
+   *
+   * <p>This is particularly beneficial for MultiPhraseQuery where multiple terms (e.g., synonyms)
+   * need statistics computed. Instead of sequential build() calls that each parallelize across
+   * segments, this method parallelizes across BOTH terms and segments.
+   *
+   * <p>Example: For 3 terms across 3 segments, this fires all 9 prefetch hints before resolving any,
+   * versus sequential build() which does 3 hints, resolve 3, then repeat.
+   *
+   * @param indexSearcher the index searcher
+   * @param terms collection of terms to build TermStates for
+   * @param needsStats if true, all leaf contexts will be visited up-front to collect term statistics
+   * @return map from term to its TermStates
+   */
+  public static Map<Term, TermStates> buildBatch(
+      IndexSearcher indexSearcher, Collection<Term> terms, boolean needsStats) throws IOException {
+    IndexReaderContext context = indexSearcher.getTopReaderContext();
+    assert context != null;
+
+    Map<Term, TermStates> results = new HashMap<>();
+
+    if (!needsStats) {
+      // If we don't need stats, just use the regular build() for each term
+      for (Term term : terms) {
+        results.put(term, build(indexSearcher, term, needsStats));
+      }
+      return results;
+    }
+
+    // Initialize TermStates for each term
+    for (Term term : terms) {
+      results.put(term, new TermStates(null, context));
+    }
+
+    // Track pending lookups for all terms across all segments
+    // Structure: Map<Term, PendingTermLookup[]> where array is indexed by segment ord
+    Map<Term, PendingTermLookup[]> allPendingLookups = new HashMap<>();
+
+    // PHASE 1: Fire all prefetch hints for ALL terms across ALL segments
+    for (Term term : terms) {
+      PendingTermLookup[] pendingTermLookups = new PendingTermLookup[0];
+
+      for (LeafReaderContext ctx : context.leaves()) {
+        Terms leafTerms = Terms.getTerms(ctx.reader(), term.field());
+        TermsEnum termsEnum = leafTerms.iterator();
+        // Schedule the I/O in the terms dictionary in the background
+        IOBooleanSupplier termExistsSupplier = termsEnum.prepareSeekExact(term.bytes());
+        if (termExistsSupplier != null) {
+          pendingTermLookups = ArrayUtil.grow(pendingTermLookups, ctx.ord + 1);
+          pendingTermLookups[ctx.ord] = new PendingTermLookup(termsEnum, termExistsSupplier);
+        }
+      }
+
+      allPendingLookups.put(term, pendingTermLookups);
+    }
+
+    // PHASE 2: Resolve ALL suppliers for ALL terms
+    for (Map.Entry<Term, PendingTermLookup[]> entry : allPendingLookups.entrySet()) {
+      Term term = entry.getKey();
+      PendingTermLookup[] pendingTermLookups = entry.getValue();
+      TermStates termStates = results.get(term);
+
+      for (int ord = 0; ord < pendingTermLookups.length; ++ord) {
+        PendingTermLookup pendingTermLookup = pendingTermLookups[ord];
+        if (pendingTermLookup != null && pendingTermLookup.supplier.get()) {
+          TermsEnum termsEnum = pendingTermLookup.termsEnum();
+          termStates.register(
+              termsEnum.termState(), ord, termsEnum.docFreq(), termsEnum.totalTermFreq());
+        }
+      }
+    }
+
+    return results;
   }
 
   /** Clears the {@link TermStates} internal state and removes all registered {@link TermState}s */
