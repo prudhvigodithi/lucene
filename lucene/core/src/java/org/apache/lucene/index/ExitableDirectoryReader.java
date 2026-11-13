@@ -954,7 +954,11 @@ public class ExitableDirectoryReader extends FilterDirectoryReader {
 
     @Override
     public TermsEnum intersect(CompiledAutomaton compiled, BytesRef startTerm) throws IOException {
-      return new ExitableTermsEnum(in.intersect(compiled, startTerm), queryTimeout);
+      // Also pass the timeout down, so that implementations that scan many terms per returned
+      // term (e.g. block tree with a leading-wildcard automaton) can stop in the middle of a
+      // single next() call. The ExitableTermsEnum still checks between returned terms.
+      TermsEnum termsEnum = in.intersect(compiled, startTerm, queryTimeout);
+      return new ExitableTermsEnum(termsEnum, queryTimeout);
     }
 
     @Override

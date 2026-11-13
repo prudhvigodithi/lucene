@@ -15,7 +15,11 @@ New Features
 
 Improvements
 ---------------------
-(No changes)
+* GITHUB#11677: Block tree's Terms#intersect now checks the query timeout of an ExitableDirectoryReader
+  while it scans the terms dictionary, so a wildcard or regexp query that visits many terms between
+  two matches, e.g. with a leading wildcard, can be stopped during a single TermsEnum#next call. This
+  adds Terms#intersect(CompiledAutomaton, BytesRef, QueryTimeout) and QueryTimeout#throwIfShouldExit.
+  (Prudhvi Godithi)
 
 Optimizations
 ---------------------

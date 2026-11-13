@@ -30,4 +30,24 @@ public interface QueryTimeout {
    * @return true if the query should stop, false otherwise
    */
   boolean shouldExit();
+
+  /**
+   * Called periodically by code that may do a large amount of work within a single call and so
+   * cannot rely on the caller to check {@link #shouldExit()} between calls, for instance the {@link
+   * TermsEnum} returned by {@link
+   * Terms#intersect(org.apache.lucene.util.automaton.CompiledAutomaton,
+   * org.apache.lucene.util.BytesRef, QueryTimeout)}.
+   *
+   * <p>The default implementation throws {@link ExitableDirectoryReader.ExitingReaderException} if
+   * {@link #shouldExit()} returns true. Implementations may override this method to throw a
+   * different unchecked exception that better suits their caller.
+   *
+   * @lucene.experimental
+   */
+  default void throwIfShouldExit() {
+    if (shouldExit()) {
+      throw new ExitableDirectoryReader.ExitingReaderException(
+          "The request took too long to complete. Timeout: " + this);
+    }
+  }
 }

@@ -96,6 +96,28 @@ public abstract class Terms {
   }
 
   /**
+   * Like {@link #intersect(CompiledAutomaton, BytesRef)}, but the returned {@link TermsEnum} may
+   * also call {@link QueryTimeout#throwIfShouldExit()} periodically while it scans terms
+   * internally, between the terms it returns. This matters for automata that accept few terms, such
+   * as a leading wildcard, where a single call to {@link TermsEnum#next()} may otherwise visit a
+   * large part of the terms dictionary without returning.
+   *
+   * <p>The default implementation ignores the timeout and calls {@link
+   * #intersect(CompiledAutomaton, BytesRef)}. Implementations whose intersection may visit many
+   * terms per returned term should override this method. {@link Terms} wrappers that override
+   * {@link #intersect(CompiledAutomaton, BytesRef)} to delegate to the wrapped instance should
+   * override this method too.
+   *
+   * @param queryTimeout the timeout to check while scanning, or {@code null} to not check
+   * @lucene.experimental
+   */
+  public TermsEnum intersect(
+      CompiledAutomaton compiled, BytesRef startTerm, QueryTimeout queryTimeout)
+      throws IOException {
+    return intersect(compiled, startTerm);
+  }
+
+  /**
    * Returns the number of terms for this field, or -1 if this measure isn't stored by the codec.
    * Note that, just like other term measures, this measure does not take deleted documents into
    * account.
